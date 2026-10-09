@@ -18,7 +18,7 @@ Antworten kannst du direkt in Telegram.
 - **📱 In der App weitermachen:** Der Knopf unter einer Fertig-Meldung schaltet
   Remote Control für die Sitzung ein (Desktop-App: direkt, ohne Modell;
   Terminal: `/remote-control`). Dann geht es in der Claude-App unter Code weiter.
-- **Rückfragen:** Bleibt eine `AskUserQuestion` 25 s unbeantwortet (bist du schon
+- **Rückfragen:** Bleibt eine `AskUserQuestion` 1 min unbeantwortet (bist du schon
   weg: sofort), kommt sie mit Knöpfen aufs Handy. Mehrfachauswahl: antippen,
   dann „Fertig“. Eigener Text: einfach antworten. Es gilt die erste Antwort,
   Rechner oder Handy; die andere Seite wird abgeräumt.
@@ -58,7 +58,7 @@ passiert nichts.
 | --- | --- |
 | `/telegram weg <min>\|aus` | Ab so viel Leerlauf giltst du als weg (Standard 1) |
 | `/telegram fertig <min>\|aus` | Zusätzlich jeden Auftrag ab so viel Laufzeit melden, auch wenn du da bist (Standard aus) |
-| `/telegram fragen <sek>\|sofort\|aus` | Wann Rückfragen aufs Handy gehen (Standard 25 s) |
+| `/telegram fragen <sek>\|sofort\|aus` | Wann Rückfragen aufs Handy gehen (Standard 60 s; bist du weg: sofort) |
 | `/telegram test` | Probe-Meldung schicken |
 | `/telegram einrichten` | Chat zum Token suchen und eintragen |
 

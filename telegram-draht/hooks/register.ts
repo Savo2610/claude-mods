@@ -9,9 +9,9 @@ const MIN = 60 * SEK
 export const WEG_AB_MIN = 1
 // Lässt sich der Leerlauf nicht messen, gilt wieder: ab 10 min Laufzeit melden.
 export const FERTIG_OHNE_MESSUNG_MIN = 10
-// Wer am Rechner sitzt, antwortet in 25 s; erst danach geht die Rückfrage aufs Handy
-// (sofort war zu viel, eine Minute zu lang).
-export const FRAGEN_NACH_SEK = 25
+// Wer am Rechner sitzt, antwortet in einer Minute; erst danach geht die Rückfrage
+// aufs Handy. (Sofort war zu viel; 25 s waren im Alltag zu knapp.)
+export const FRAGEN_NACH_SEK = 60
 // Solange eine Rückfrage offen ist, alle 4 s nachsehen: ein Knopfdruck wirkt spürbar sofort.
 const POLL_MS = 4 * SEK
 // Auf eine Fertig-Meldung antwortet man selten sofort: da reichen 15 s.

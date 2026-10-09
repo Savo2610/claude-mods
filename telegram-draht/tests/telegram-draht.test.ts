@@ -216,12 +216,12 @@ describe('Einrichten', () => {
 })
 
 describe('Rückfragen', () => {
-  test('standardmäßig nach 25 s aufs Handy', async ($, on) => {
+  test('standardmäßig nach einer Minute aufs Handy', async ($, on) => {
     const uhr = mock.clock(on, { now: START })
     const w = welt(on)
     await $.session.start(session)
     void $.tool.call({ tool: 'AskUserQuestion', questions: [frage] })
-    await uhr.advance(24 * 1000)
+    await uhr.advance(59 * 1000)
     expect(w.sent()).toHaveLength(0)
     await uhr.advance(2 * 1000)
     expect(w.sent()).toHaveLength(1)
@@ -269,7 +269,7 @@ describe('Rückfragen', () => {
     const w = welt(on, { updates: [text('Grün bitte')] })
     await $.session.start(session)
     const antwort = $.tool.call({ tool: 'AskUserQuestion', questions: [frage] })
-    await uhr.advance(26 * 1000)
+    await uhr.advance(61 * 1000)
     await uhr.advance(4 * 1000)
     const r = await antwort
     expect(r).toMatchObject({ result: { answers: { [frage.question]: 'Grün bitte' } } })

@@ -1,6 +1,6 @@
 {
   "name": "telegram-draht",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Meldet lange Aufträge per Telegram, schickt unbeantwortete Rückfragen mit Knöpfen aufs Handy und nimmt Antworten aus Telegram als Nachricht an.",
   "author": {
     "name": "Julian Veerkamp"
