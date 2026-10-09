@@ -1,0 +1,8 @@
+{
+  "name": "deploy-wacht",
+  "version": "0.1.0",
+  "description": "Beobachtet nach jedem git push den Cloudflare-Build (Workers Builds), zeigt den Stand unter dem Prompt, gibt Claude bei einem roten Build das Log und meldet per Telegram, wenn du weg bist.",
+  "author": {
+    "name": "Julian Veerkamp"
+  }
+}
