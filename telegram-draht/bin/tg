@@ -1,0 +1,15 @@
+#!/bin/bash
+# Schickt eine Telegram-Nachricht an dich: tg "Text" oder echo "Text" | tg.
+# Zugangsdaten aus ~/.claude/telegram.env. Exit 0 = angekommen.
+. "$HOME/.claude/telegram.env" 2>/dev/null
+if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+  echo "tg: ~/.claude/telegram.env fehlt oder ist unvollständig" >&2; exit 2
+fi
+TEXT=${*:-$(cat)}
+[ -z "$TEXT" ] && { echo "tg: kein Text" >&2; exit 2; }
+ANTWORT=$(curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXT:0:4000}" 2>&1)
+case "$ANTWORT" in
+  *'"ok":true'*) echo "tg: gesendet"; exit 0 ;;
+  *) echo "tg: Senden fehlgeschlagen: ${ANTWORT//$TELEGRAM_BOT_TOKEN/…}" >&2; exit 1 ;;
+esac

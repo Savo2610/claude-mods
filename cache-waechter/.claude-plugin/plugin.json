@@ -1,0 +1,8 @@
+{
+  "name": "cache-waechter",
+  "version": "1.1.0",
+  "description": "Warnt vor teuren Nachrichten in großen, kalt gewordenen Sitzungen, zeigt die Cache-Restzeit unten rechts nur bei Bedarf und fragt vor dem Abkühlen per Telegram nach.",
+  "author": {
+    "name": "Julian Veerkamp"
+  }
+}
