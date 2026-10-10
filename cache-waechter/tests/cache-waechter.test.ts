@@ -235,9 +235,9 @@ describe('Anzeige', () => {
 })
 
 describe('Telegram', () => {
-  async function bisZurFrage($: Engine, on: On, updates: unknown[][] = []) {
+  async function bisZurFrage($: Engine, on: On, updates: unknown[][] = [], ctx = 300_000) {
     const uhr = mock.clock(on, { now: START })
-    const w = welt(on, { ctx: 300_000, updates })
+    const w = welt(on, { ctx, updates })
     await $.session.start(session)
     await $.turn.complete(zug())
     await uhr.advance(50 * MIN + 1000)
@@ -278,6 +278,74 @@ describe('Telegram', () => {
     const fuss = await $.ui.mount({ plugin: 'cache-waechter', surface: 'desktop', component: 'SessionMode', props: { modes: [] } })
     expect(await fuss.find({ type: 'Text', text: 'Cache 🗜 komprimiert' })).toBeDefined()
     await fuss.unmount()
+  })
+
+  test('ab 400k wird ohne Antwort kurz vor dem Abkühlen komprimiert', async ($, on) => {
+    const { uhr, w, send } = await bisZurFrage($, on, [], 450_000)
+    expect(String(send?.body.text)).toContain('Ohne Antwort komprimiere ich in 7 min')
+    const zweite = (send?.body.reply_markup as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard[1] ?? []
+    expect(zweite.map(k => k.callback_data.split(':')[2])).toEqual(['warm3', 'warm8'])
+    await uhr.advance(5 * MIN)
+    expect(w.compacts.length).toBe(0)
+    await uhr.advance(2 * MIN)
+    expect(w.compacts.length).toBe(1)
+    expect(String(w.tg.find(a => a.methode === 'editMessageText')?.body.text)).toContain('Keine Antwort, daher von selbst')
+    await uhr.advance(10 * MIN)
+    expect(w.compacts.length).toBe(1)
+  })
+
+  test('unter 400k wird nie von selbst komprimiert', async ($, on) => {
+    const { uhr, w } = await bisZurFrage($, on, [], 350_000)
+    await uhr.advance(15 * MIN)
+    expect(w.compacts.length).toBe(0)
+  })
+
+  test('„Nichts“ verbietet auch das Komprimieren von selbst', async ($, on) => {
+    const updates: unknown[][] = []
+    const { uhr, w, kennung } = await bisZurFrage($, on, updates, 450_000)
+    updates.push(knopf('nichts', kennung))
+    await uhr.advance(15 * MIN)
+    expect(w.compacts.length).toBe(0)
+  })
+
+  test('/cache auto aus schaltet es ab', async ($, on) => {
+    const uhr = mock.clock(on, { now: START })
+    const w = welt(on, { ctx: 450_000 })
+    await $.session.start(session)
+    await $.command.run(befehl('auto aus'))
+    await $.turn.complete(zug())
+    await uhr.advance(65 * MIN)
+    expect(w.compacts.length).toBe(0)
+  })
+
+  test('3 h warm: pingt alle 55 min ohne zu fragen, danach kommt wieder die Frage', async ($, on) => {
+    const updates: unknown[][] = []
+    const { uhr, w, kennung } = await bisZurFrage($, on, updates, 450_000)
+    updates.push(knopf('warm3', kennung))
+    await uhr.advance(5000)
+    expect(w.forks.length).toBe(1)
+    expect(String(w.tg.find(a => a.methode === 'editMessageText')?.body.text)).toMatch(/noch (2 h 59|3 h 00) min warm/)
+    // Pings bei +55, +110 und +165 min liegen in den 3 h; komprimiert oder gefragt wird nicht.
+    await uhr.advance(3 * 55 * MIN + 10_000)
+    expect(w.forks.length).toBe(4)
+    expect(w.compacts.length).toBe(0)
+    expect(w.tg.filter(a => a.methode === 'sendMessage').length).toBe(1)
+    // Der nächste Ping läge nach den 3 h: also wieder die Frage nach 50 min.
+    await uhr.advance(50 * MIN)
+    expect(w.tg.filter(a => a.methode === 'sendMessage').length).toBe(2)
+    expect(w.forks.length).toBe(4)
+  })
+
+  test('/cache warm hält auch ohne Telegram warm', async ($, on) => {
+    const uhr = mock.clock(on, { now: START })
+    const w = welt(on, { ctx: 450_000 })
+    await $.session.start(session)
+    await $.command.run(befehl('telegram aus'))
+    await $.turn.complete(zug())
+    expect((await $.command.run(befehl('warm 2'))).text).toContain('2 h 00 min')
+    await uhr.advance(56 * MIN)
+    expect(w.forks.length).toBe(1)
+    expect(w.compacts.length).toBe(0)
   })
 
   test('eine offene Frage übersteht das Neuladen der Mod', async ($, on) => {

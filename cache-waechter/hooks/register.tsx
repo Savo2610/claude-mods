@@ -31,13 +31,21 @@ const HAENGT_MS = 20 * 1000
 const NEUVERSUCH_MS = MIN
 const TICK_MS = 30 * 1000
 const PING_PROMPT = 'Antworte nur mit dem Wort: warm'
+// Ab 400k wird ohne Antwort komprimiert: ein kalter Neuaufbau kostet dann mehr
+// als die Zusammenfassung (10.10., wie gewünscht). Erst 3 min vor dem Abkühlen,
+// solange der Cache noch warm ist: dann liest auch das Komprimieren aus ihm.
+export const AUTO_KOMPAKT_AB = 400_000
+const AUTO_REST_MS = 3 * MIN
+// Länger warmhalten: alle 55 min ein Ping, 5 min Luft vor dem Abkühlen.
+export const WARM_PING_MS = 55 * MIN
+export const WARM_STUNDEN = [3, 8] as const
 
 export type Anzeige = 'aus' | 'knapp' | 'immer'
 // „unten“: klein rechts in der Fußzeile, nah an der Verbrauchsanzeige der App
 // (in die selbst darf eine Mod nicht zeichnen). „oben“: die breite Zeile über der Eingabe.
 export type Ort = 'unten' | 'oben'
-type Aktion = 'kompakt' | 'warm' | 'nichts'
-const AKTIONEN: readonly string[] = ['kompakt', 'warm', 'nichts']
+type Aktion = 'kompakt' | 'warm' | 'warm3' | 'warm8' | 'nichts'
+const AKTIONEN: readonly string[] = ['kompakt', 'warm', 'warm3', 'warm8', 'nichts']
 
 export type Lage = {
   /** Wann die Hauptsitzung zuletzt ans Modell ging (ms); 0 = noch nie. */
@@ -110,7 +118,7 @@ type TgUpdate = {
 type Frage = { kennung: string; messageId: number; bis: number; text: string }
 
 /** Was eine Sitzung im Store hinterlässt, damit ein Neuladen der Mod nahtlos weitermacht. */
-type Merk = { zeit: number; kompakt: boolean; gefragt: number; frage: Frage | null; at: number }
+type Merk = { zeit: number; kompakt: boolean; gefragt: number; frage: Frage | null; at: number; warmBis?: number; verzicht?: number }
 
 /** Liest ~/.claude/telegram.env, dieselbe Datei wie telegram-draht und ~/.claude/bin/tg. */
 export function leseZugang(text: string): TgZugang | null {
@@ -157,6 +165,16 @@ type Zustand = {
   angehalten: Angehalten | null
   /** Ob die letzte Messung Abo-Limits kannte; null = noch keine Messung. */
   abo: boolean | null
+  /** Ab 400k ohne Antwort komprimieren. */
+  auto: boolean
+  /** Bis wann der Cache von selbst warmgehalten wird; 0 = nicht. */
+  warmBis: number
+  /** Die letzte Anfrage, zu der „Nichts“ gewählt wurde: dann auch nicht von selbst komprimieren. */
+  verzicht: number
+  /** Die letzte Anfrage, zu der schon von selbst komprimiert wurde. */
+  autoVersucht: number
+  /** Ein Ping oder Komprimieren läuft gerade. */
+  arbeitet: boolean
 }
 
 function neuerZustand(): Zustand {
@@ -164,6 +182,7 @@ function neuerZustand(): Zustand {
     lage: { letzteAnfrage: 0, ctx: 0, kompaktiert: false }, anzeige: 'knapp', ort: 'unten', warnung: true, telegram: true,
     quittiert: 0, laeuft: false, projekt: '', zugang: undefined, offset: 0, frage: null, fragt: false,
     gefragt: 0, naechsterVersuch: 0, holtSeit: 0, tgFehler: '', erledigt: [], fremdSeit: new Map(), warnTest: false, angehalten: null, abo: null,
+    auto: true, warmBis: 0, verzicht: 0, autoVersucht: 0, arbeitet: false,
   }
 }
 
@@ -173,6 +192,9 @@ function vergiss(z: Zustand) {
   z.quittiert = 0
   z.gefragt = 0
   z.angehalten = null
+  z.warmBis = 0
+  z.verzicht = 0
+  z.autoVersucht = 0
 }
 
 function kennung(): string {
@@ -209,7 +231,10 @@ async function merkKey($: EngineInterface): Promise<string> {
 }
 
 async function speichern($: EngineInterface, z: Zustand) {
-  const m: Merk = { zeit: z.lage.letzteAnfrage, kompakt: z.lage.kompaktiert, gefragt: z.gefragt, frage: z.frage, at: await $.clock.now() }
+  const m: Merk = {
+    zeit: z.lage.letzteAnfrage, kompakt: z.lage.kompaktiert, gefragt: z.gefragt, frage: z.frage, at: await $.clock.now(),
+    warmBis: z.warmBis, verzicht: z.verzicht,
+  }
   await $.store.set(await merkKey($), m)
 }
 
@@ -225,6 +250,8 @@ async function laden($: EngineInterface, z: Zustand, now: number) {
   if (m.zeit && !z.lage.letzteAnfrage) z.lage.letzteAnfrage = m.zeit
   z.lage.kompaktiert = m.kompakt
   z.gefragt = m.gefragt
+  z.warmBis = m.warmBis ?? 0
+  z.verzicht = m.verzicht ?? 0
   if (m.frage && m.frage.bis > now) z.frage = m.frage
 }
 
@@ -298,9 +325,85 @@ async function schliesseFrage($: EngineInterface, z: Zustand, zusatz: string) {
 function faellig(z: Zustand, now: number): boolean {
   const l = z.lage
   if (!z.telegram || z.laeuft || z.frage || z.fragt || l.kompaktiert || l.ctx < TELEGRAM_AB || !l.letzteAnfrage) return false
-  if (z.gefragt === l.letzteAnfrage || now < z.naechsterVersuch) return false
+  if (z.gefragt === l.letzteAnfrage || now < z.naechsterVersuch || warmGedeckt(z)) return false
   const alter = now - l.letzteAnfrage
   return alter >= FRAGE_NACH_MS && TTL_MS - alter >= FRAGE_MIN_REST_MS
+}
+
+/** Ob der nächste Ping noch in die gewählte Warmhaltezeit fällt: dann wird nicht gefragt. */
+function warmGedeckt(z: Zustand): boolean {
+  return z.lage.letzteAnfrage > 0 && z.warmBis >= z.lage.letzteAnfrage + WARM_PING_MS
+}
+
+/** Ob gerade nichts anderes läuft, das ein Ping oder Komprimieren stören würde. */
+function frei(z: Zustand): boolean {
+  return !z.laeuft && !z.arbeitet && !z.holtSeit && !z.lage.kompaktiert && z.lage.letzteAnfrage > 0
+}
+
+/** Ob jetzt der Ping fällig ist, der den Cache über die gewählte Zeit warmhält. */
+function warmFaellig(z: Zustand, now: number): boolean {
+  if (!frei(z) || !warmGedeckt(z)) return false
+  const alter = now - z.lage.letzteAnfrage
+  // Schon kalt (Mod zu spät geladen): ein Ping würde alles neu schreiben, das ist kein Warmhalten.
+  return alter >= WARM_PING_MS && alter < TTL_MS - 30 * 1000
+}
+
+/** Ob jetzt von selbst komprimiert wird: ab 400k, ohne Antwort, kurz vor dem Abkühlen. */
+function autoFaellig(z: Zustand, now: number): boolean {
+  const l = z.lage
+  if (!z.auto || !frei(z) || l.ctx < AUTO_KOMPAKT_AB || warmGedeckt(z)) return false
+  if (z.verzicht === l.letzteAnfrage || z.autoVersucht === l.letzteAnfrage) return false
+  const alter = now - l.letzteAnfrage
+  return alter >= TTL_MS - AUTO_REST_MS && alter < TTL_MS
+}
+
+async function autoKompakt($: EngineInterface, z: Zustand) {
+  z.autoVersucht = z.lage.letzteAnfrage
+  z.arbeitet = true
+  // Die Frage beiseite: ein Knopfdruck während des Komprimierens gilt als erledigt.
+  const f = z.frage
+  z.frage = null
+  let ergebnis: string
+  try {
+    ergebnis = await kompaktiere($, z)
+  } catch (err) {
+    merkeFehler($, z, err)
+    ergebnis = `⚠️ Ging nicht: ${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    z.arbeitet = false
+  }
+  $.ui.toast(`Cache-Wächter: ab ${fmtTok(AUTO_KOMPAKT_AB)} ohne Antwort komprimiert`)
+  if (!f) return
+  z.frage = f
+  await schliesseFrage($, z, `⏱ Keine Antwort, daher von selbst: ${ergebnis}`)
+}
+
+async function autoWarm($: EngineInterface, z: Zustand) {
+  z.arbeitet = true
+  let text: string
+  try {
+    text = await halteWarm($, z)
+  } catch (err) {
+    merkeFehler($, z, err)
+    text = `⚠️ Warmhalten ging nicht: ${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    z.arbeitet = false
+  }
+  if (!text.startsWith('⚠️')) return
+  // Kein Endlos-Versuch alle 4 s: die Warmhaltezeit endet, ab dann gilt wieder Frage bzw. Komprimieren.
+  z.warmBis = 0
+  await speichern($, z)
+  const zg = z.telegram ? await zugangLesen($, z) : null
+  if (zg) await tgLeise($, z, 'sendMessage', { chat_id: zg.chat, text: `${text}\n📁 ${z.projekt || 'Claude Code'}` })
+}
+
+/** Ein Takt für alles: von selbst komprimieren, warmhalten, fragen, Antworten abholen. */
+async function takt($: EngineInterface, z: Zustand) {
+  const t = await $.clock.now()
+  if (autoFaellig(z, t)) return autoKompakt($, z)
+  if (warmFaellig(z, t)) return autoWarm($, z)
+  if (z.frage) return hole($, z)
+  if (faellig(z, t)) await stelleFrage($, z, false)
 }
 
 async function stelleFrage($: EngineInterface, z: Zustand, test: boolean): Promise<string> {
@@ -313,21 +416,25 @@ async function stelleFrage($: EngineInterface, z: Zustand, test: boolean): Promi
     const now = await $.clock.now()
     const id = kennung()
     const rest = z.lage.letzteAnfrage && !istKalt(z.lage, now) ? z.lage.letzteAnfrage + TTL_MS - now : 0
+    const auto = !test && z.auto && z.lage.ctx >= AUTO_KOMPAKT_AB && rest > AUTO_REST_MS
     const text = [
       test ? '🧪 Testfrage, die Knöpfe wirken echt' : `🧊 Cache kühlt in ${fmtDauer(rest)} ab`,
       `📁 ${z.projekt || 'Claude Code'} · ${fmtTok(z.lage.ctx)} Tokens`,
       '',
-      'Was soll passieren?',
+      auto ? `Was soll passieren? Ohne Antwort komprimiere ich in ${fmtDauer(rest - AUTO_REST_MS)}.` : 'Was soll passieren?',
     ].join('\n')
     const msg = await tg($, z, 'sendMessage', {
       chat_id: zg.chat,
       text,
       reply_markup: {
-        inline_keyboard: [[
-          { text: '🗜 Komprimieren', callback_data: `cw:${id}:kompakt` },
-          { text: '🔥 Warmhalten', callback_data: `cw:${id}:warm` },
-          { text: 'Nichts', callback_data: `cw:${id}:nichts` },
-        ]],
+        inline_keyboard: [
+          [
+            { text: '🗜 Komprimieren', callback_data: `cw:${id}:kompakt` },
+            { text: '🔥 1 h warm', callback_data: `cw:${id}:warm` },
+            { text: 'Nichts', callback_data: `cw:${id}:nichts` },
+          ],
+          WARM_STUNDEN.map(h => ({ text: `🔥 ${h} h warm`, callback_data: `cw:${id}:warm${h}` })),
+        ],
       },
     }) as { message_id: number }
     // Die Testfrage gilt zehn Minuten, eine echte bis der Cache kalt ist.
@@ -360,7 +467,7 @@ async function offenAnderswo($: EngineInterface, id: string, now: number): Promi
 // Antworten für andere Sitzungen landen dort ebenfalls.
 async function hole($: EngineInterface, z: Zustand) {
   const jetzt = await $.clock.now()
-  if (!z.frage || (z.holtSeit && jetzt - z.holtSeit < HAENGT_MS)) return
+  if (!z.frage || z.arbeitet || (z.holtSeit && jetzt - z.holtSeit < HAENGT_MS)) return
   z.holtSeit = jetzt
   try {
     const zg = await zugangLesen($, z)
@@ -429,11 +536,18 @@ async function beantworte($: EngineInterface, z: Zustand, aktion: Aktion, cqId: 
   // Sofort quittieren: Telegram lässt den Knopf sonst drehen, und Komprimieren dauert.
   await tgStill($, z, 'answerCallbackQuery', { callback_query_id: cqId, text: aktion === 'nichts' ? 'Okay' : 'Wird erledigt …' })
   let ergebnis: string
+  const now = await $.clock.now()
+  const stunden = aktion === 'warm3' ? 3 : aktion === 'warm8' ? 8 : 0
+  // Jede Antwort ersetzt eine frühere Warmhaltezeit; „Nichts“ verbietet auch das Komprimieren von selbst.
+  z.warmBis = stunden ? now + stunden * 60 * MIN : 0
+  if (aktion === 'nichts') z.verzicht = z.lage.letzteAnfrage
   try {
     ergebnis = aktion === 'kompakt' ? await kompaktiere($, z)
-      : aktion === 'warm' ? await halteWarm($, z)
-      : '👍 Okay, er darf abkühlen.'
+      : aktion === 'nichts' ? '👍 Okay, er darf abkühlen.'
+      : await halteWarm($, z)
+    if (ergebnis.startsWith('⚠️')) z.warmBis = 0
   } catch (err) {
+    z.warmBis = 0
     // Was auch schiefgeht: die Nachricht bekommt eine Antwort und die Frage wird geschlossen.
     merkeFehler($, z, err)
     ergebnis = `⚠️ Ging nicht: ${err instanceof Error ? err.message : String(err)}`
@@ -445,6 +559,7 @@ async function beantworte($: EngineInterface, z: Zustand, aktion: Aktion, cqId: 
 /** Nach dem Komprimieren: keine Uhr mehr, bis der nächste Zug den Cache neu aufbaut. */
 async function merkeKompakt($: EngineInterface, z: Zustand, nachher: number | undefined) {
   z.lage.kompaktiert = true
+  z.warmBis = 0
   if (nachher) z.lage.ctx = nachher
   await speichern($, z)
   neuZeichnen($)
@@ -485,9 +600,12 @@ async function halteWarm($: EngineInterface, z: Zustand): Promise<string> {
   await speichern($, z)
   neuZeichnen($)
   const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
+  const weiter = warmGedeckt(z)
+    ? ` Ich halte ihn noch ${fmtDauer(z.warmBis - now)} warm, danach frage ich wieder.`
+    : ' In 50 min frage ich wieder.'
   return warm
-    ? `🔥 Warmgehalten: ${fmtTok(u.cache_read_input_tokens)} Tokens aus dem Cache gelesen. In 50 min frage ich wieder.`
-    : `🔥 Der Cache war schon weg: ${fmtTok(u.cache_creation_input_tokens)} Tokens neu geschrieben, jetzt ist er wieder warm.`
+    ? `🔥 Warmgehalten: ${fmtTok(u.cache_read_input_tokens)} Tokens aus dem Cache gelesen.${weiter}`
+    : `🔥 Der Cache war schon weg: ${fmtTok(u.cache_creation_input_tokens)} Tokens neu geschrieben, jetzt ist er wieder warm.${weiter}`
 }
 
 function karte(z: Zustand, now: number): string {
@@ -509,15 +627,19 @@ function karte(z: Zustand, now: number): string {
       tele += ` · nächste in ${fmtDauer(l.letzteAnfrage + FRAGE_NACH_MS - now)}`
     if (z.tgFehler) tele += `\n          letzter Fehler: ${z.tgFehler}`
   }
+  const auto = z.auto ? `an – ab ${fmtTok(AUTO_KOMPAKT_AB)} Tokens 3 min vor dem Abkühlen, wenn in Telegram nichts gewählt ist` : 'aus'
+  const warm = warmGedeckt(z) ? `noch ${fmtDauer(z.warmBis - now)}, Ping alle ${WARM_PING_MS / MIN} min` : 'nein'
   const zeilen = [
     `Cache     ${zustand}`,
     `Anzeige   ${anz}${wo}`,
     `Warnung   ${z.warnung ? `an – hält Nachrichten in einen kalten Cache ab ${fmtTok(WARN_AB)} Tokens einmal an` : 'aus'}`,
     `Telegram  ${tele}`,
+    `Auto      ${auto}`,
+    `Warm      ${warm}`,
   ]
   // Ohne Abo-Limits ist es vermutlich ein API-Schlüssel: dort gilt die Stunde nur mit promptCacheTtl.
   if (z.abo === false) zeilen.push('', 'Hinweis: kein Abo erkannt. Ohne Abo hält der Cache 5 min, außer promptCacheTtl steht auf "1h".')
-  zeilen.push('', '/cache anzeige aus|knapp|immer|unten|oben · warnung an|aus|test · telegram an|aus|test')
+  zeilen.push('', '/cache anzeige aus|knapp|immer|unten|oben · warnung an|aus|test · telegram an|aus|test · auto an|aus · warm <h>|aus')
   return zeilen.join('\n')
 }
 
@@ -533,6 +655,7 @@ export const register: Register = on => {
     z.ort = (await $.store.get('ort')) === 'oben' ? 'oben' : 'unten'
     z.warnung = (await $.store.get('warnung')) !== false
     z.telegram = (await $.store.get('telegram')) !== false
+    z.auto = (await $.store.get('auto')) !== false
     // Ein Neuladen der Mod beginnt mit leerem Zustand: die Uhr liegt im Store,
     // den Kontext kennt die Engine (außer nach /compact, da zählt die letzte
     // Antwort noch den alten Verlauf).
@@ -543,17 +666,14 @@ export const register: Register = on => {
     await $.command.register({
       name: 'cache',
       description: 'Prompt-Cache: Zustand, Anzeige, Warnung und Telegram-Frage (cache-waechter)',
-      argumentHint: '[anzeige aus|knapp|immer|unten|oben | warnung an|aus|test | telegram an|aus|test]',
+      argumentHint: '[anzeige aus|knapp|immer|unten|oben | warnung an|aus|test | telegram an|aus|test | auto an|aus | warm <h>|aus]',
       immediate: true,
     })
     // Ein Takt für alles Telegram: er stellt die Frage, wenn sie fällig ist, und
     // holt Antworten ab, solange sie offen ist. Er läuft ab Sitzungsstart; einer,
     // den ein Befehl startet, überlebt dessen Ende nicht verlässlich, und ein
     // einmaliger Wecker ginge beim Neuladen der Mod verloren.
-    $.clock.every(POLL_MS, () => {
-      if (z.frage) return void hole($, z)
-      void $.clock.now().then(t => { if (faellig(z, t)) void stelleFrage($, z, false) })
-    })
+    $.clock.every(POLL_MS, () => void takt($, z))
     $.clock.every(TICK_MS, () => {
       if (z.anzeige !== 'aus' || z.angehalten) neuZeichnen($)
     })
@@ -635,6 +755,20 @@ export const register: Register = on => {
       await $.store.set('telegram', z.telegram)
       if (!z.telegram) await schliesseFrage($, z, 'Telegram-Fragen wurden ausgeschaltet.')
       return { text: `Telegram: ${wert}` }
+    }
+    if (was === 'auto') {
+      if (wert !== 'an' && wert !== 'aus') return { text: 'Automatisch komprimieren: an oder aus?' }
+      z.auto = wert === 'an'
+      await $.store.set('auto', z.auto)
+      return { text: z.auto ? `Ab ${fmtTok(AUTO_KOMPAKT_AB)} Tokens wird ohne Antwort 3 min vor dem Abkühlen komprimiert.` : 'Es wird nie von selbst komprimiert.' }
+    }
+    if (was === 'warm') {
+      const h = wert === 'aus' ? 0 : Number(wert.replace(',', '.').replace(/h$/, ''))
+      if (!Number.isFinite(h) || h < 0 || h > 24 || (wert !== 'aus' && !wert)) return { text: 'Warmhalten: Stunden (z. B. 3, höchstens 24) oder aus?' }
+      z.warmBis = h ? now + h * 60 * MIN : 0
+      await speichern($, z)
+      if (!h) return { text: 'Kein Warmhalten mehr: ab jetzt gilt wieder Frage bzw. Komprimieren.' }
+      return { text: `Der Cache wird ${fmtDauer(h * 60 * MIN)} lang warmgehalten: alle ${WARM_PING_MS / MIN} min ein kurzer Ping, solange niemand schreibt.` }
     }
     await zugangLesen($, z)
     const unbekannt = was && was !== 'hilfe' && was !== 'help' && was !== 'status' ? `„${String(e.args).trim()}“ kenne ich nicht.\n\n` : ''
