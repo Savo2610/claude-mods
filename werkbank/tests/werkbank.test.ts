@@ -62,7 +62,7 @@ describe('Hilfen', () => {
 
 // commitVor / dateiVor: wie viele Minuten der letzte Commit bzw. die offenen Dateien zurückliegen.
 type Wt = { pfad: string; branch: string; vor: number; hinter?: number; offen?: number; commitVor?: number; dateiVor?: number }
-type Opts = { wts?: Wt[]; server?: { pid: number; port: number; cwd: string }[]; andere?: { sid: string; name: string; cwd: string; busy: boolean; checkout?: string }[] }
+type Opts = { wts?: Wt[]; server?: { pid: number; port: number; cwd: string; cmd?: string }[]; andere?: { sid: string; name: string; cwd: string; busy: boolean; checkout?: string }[] }
 
 const session: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: R }
 const befehl = (args: string): CommandRunInput => ({ command: 'werkbank', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
@@ -143,7 +143,7 @@ function welt(on: On, opts: Opts = {}) {
       return aus('', 1)
     }
     if (a[0] === '/usr/sbin/lsof' && a.includes('-iTCP')) {
-      return aus(server.map(x => `p${x.pid}\ncnode\nn127.0.0.1:${x.port}`).join('\n'))
+      return aus(server.map(x => `p${x.pid}\nc${x.cmd ?? 'node'}\nn127.0.0.1:${x.port}`).join('\n'))
     }
     if (a[0] === '/usr/sbin/lsof') return aus(server.map(x => `p${x.pid}\nfcwd\nn${x.cwd}`).join('\n'))
     if (a[0] === '/bin/ps' && a[2] === 'pid=') return aus(sitzungen.map(x => x.pid).join('\n'))
@@ -162,6 +162,8 @@ function welt(on: On, opts: Opts = {}) {
     if (a[0] === '/bin/rm') return aus('')
     if (a[0] === '/bin/sh') {
       const skript = a[2]!
+      // Die Prozesskette über der Werkbank: 1000 ist „dieser Claude-Prozess“.
+      if (skript.includes('PPID')) return aus('1000\n999\n')
       if (skript.includes('nohup')) {
         gestartet.push(skript)
         const cwd = /cd '([^']+)'/.exec(skript)![1]!
@@ -284,6 +286,30 @@ describe('Dev-Server', () => {
     })
     await $.session.start(session)
     expect((await $.command.run(befehl('dev'))).text).toContain('raupe (zuletzt geändert vor 1 min)')
+  })
+
+  test('nie die eigene Sitzung stoppen: Claude-Prozesse und Unbekanntes bleiben', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = welt(on, {
+      wts: [{ pfad: `${R}-raupe`, branch: 'raupe', vor: 1 }],
+      server: [
+        // So sieht eine Claude-Code-Sitzung für lsof aus: lauscht lokal, cwd im Repo.
+        { pid: 90, port: 52502, cwd: R, cmd: 'claude' },
+        { pid: 91, port: 7000, cwd: R, cmd: 'ControlCe' },
+        { pid: 92, port: 3000, cwd: R, cmd: 'node' },
+        // Ein Server in der eigenen Prozesskette, falls es je so käme.
+        { pid: 1000, port: 5173, cwd: R, cmd: 'node' },
+      ],
+    })
+    await $.session.start(session)
+    const lage = await $.command.run(befehl(''))
+    expect(lage.text).not.toContain('52502')
+    const r = await $.command.run(befehl('dev raupe'))
+    expect(r.text).toContain('raupe läuft auf http://localhost:5174/')
+    expect(w.getoetet).toContain(92)
+    for (const pid of [90, 91, 1000, 999]) expect(w.getoetet).not.toContain(pid)
+    expect((await $.command.run(befehl('stopp alle'))).text).not.toContain('52502')
+    expect(w.getoetet).not.toContain(90)
   })
 
   test('der Server einer arbeitenden Sitzung bleibt stehen', async ($, on) => {

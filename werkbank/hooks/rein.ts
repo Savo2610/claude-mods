@@ -48,6 +48,22 @@ export function leseLauscher(ausgabe: string): Lauscher[] {
   return aus
 }
 
+// Claude-Code-Sitzungen lauschen selbst auf einem lokalen Port und haben den
+// Projektordner als cwd: sie sind kein Server und dürfen nie gestoppt werden
+// (10.10.: /werkbank dev hat so die eigene Sitzung beendet).
+const KEIN_SERVER = /claude/i
+// Gestoppt wird nur, was nach Dev-Server aussieht (lsof kürzt den Namen auf 15 Zeichen).
+const DEV_SERVER = /^(node|bun|deno|workerd|wrangler|vite|esbuild|npm|pnpm|yarn|python[\d.]*|ruby|php|java|hugo|astro|next-server.*)$/i
+
+export function istServer(cmd: string): boolean {
+  return !KEIN_SERVER.test(cmd)
+}
+
+/** Ob ein Lauscher gestoppt werden darf: auf einem festen Platz-Port oder ein bekannter Dev-Server. */
+export function stoppbar(s: { cmd: string; art: string }): boolean {
+  return istServer(s.cmd) && (s.art !== 'anderer' || DEV_SERVER.test(s.cmd))
+}
+
 /** `lsof -a -d cwd -p … -Fpn`: Prozess → Arbeitsordner. */
 export function leseCwds(ausgabe: string): Map<number, string> {
   const m = new Map<number, string>()

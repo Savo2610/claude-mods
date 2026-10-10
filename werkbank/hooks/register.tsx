@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import {
-  absolut, befehlsOrt, checkoutVon, fmtAlter, istHauptbranch, istWorktreeAdd, leseCwds, leseLauscher, leseWorktrees,
+  absolut, befehlsOrt, checkoutVon, fmtAlter, istHauptbranch, istServer, istWorktreeAdd, stoppbar, leseCwds, leseLauscher, leseWorktrees,
   loeschZiele, naechsterPlatz, offenePfade, portsFuer, PUSH, q, startBefehl, zaehleOffen, zielMain, zuletztGeaendert,
 } from './rein'
 
@@ -55,6 +55,8 @@ type Zustand = {
   aufraeumenNachZug: Set<string>
   status: string | undefined
   meldung: string
+  /** Dieser Claude-Prozess und seine Vorfahren: nie stoppen. */
+  vorfahren: Set<number> | null
 }
 
 // ---------- Host ----------
@@ -171,7 +173,7 @@ async function ladeLage($: EngineInterface, z: Zustand, repo: string): Promise<L
   const server: Server[] = []
   for (const l of await lauscher($)) {
     const pfad = checkoutVon(l.cwd, pfade)
-    if (!pfad) continue
+    if (!pfad || !istServer(l.cmd)) continue
     const c = checkouts.find(x => x.pfad === pfad)!
     server.push({ pid: l.pid, port: l.port, cmd: l.cmd, pfad, art: l.port === c.web ? 'web' : l.port === c.api ? 'api' : 'anderer' })
   }
@@ -267,8 +269,19 @@ async function nachfahren($: EngineInterface, pid: number): Promise<number[]> {
   return alle
 }
 
-/** Stoppt Server samt Kindern; ein npm darüber, das nur ihn trug, gleich mit. */
-async function stoppe($: EngineInterface, server: readonly Server[]) {
+/** Die Prozesskette über dem Befehl: dieser Claude-Prozess und alles darüber. */
+async function vorfahren($: EngineInterface, z: Zustand): Promise<Set<number>> {
+  if (z.vorfahren) return z.vorfahren
+  const r = await lauf($, ['/bin/sh', '-c', 'p=$PPID; while [ "$p" -gt 1 ] 2>/dev/null; do echo "$p"; p=$(/bin/ps -o ppid= -p "$p" | tr -d " "); done'])
+  const pids = new Set(r.stdout.split('\n').map(Number).filter(Boolean))
+  if (pids.size) z.vorfahren = pids
+  return pids
+}
+
+/** Stoppt Server samt Kindern; ein npm darüber, das nur ihn trug, gleich mit. Nie Claude selbst. */
+async function stoppe($: EngineInterface, z: Zustand, alle: readonly Server[]) {
+  const schutz = await vorfahren($, z)
+  const server = alle.filter(s => stoppbar(s) && !schutz.has(s.pid))
   const ziele = new Set<number>()
   for (const s of server) {
     for (const k of await nachfahren($, s.pid)) ziele.add(k)
@@ -281,7 +294,9 @@ async function stoppe($: EngineInterface, server: readonly Server[]) {
       if (/\bnpm\b|npm-cli|\bsh -c .*(vite|wrangler)/.test(pc)) ziele.add(ppid)
     }
   }
+  for (const p of schutz) ziele.delete(p)
   if (ziele.size) await lauf($, ['/bin/kill', '-TERM', ...[...ziele].map(String)])
+  return server
 }
 
 async function wartePort($: EngineInterface, port: number, sekunden = 40): Promise<boolean> {
@@ -304,8 +319,7 @@ async function oeffne($: EngineInterface, url: string): Promise<boolean> {
 /** Startet den Dev-Server eines Checkouts auf seinem Platz und stoppt die anderen des Repos. */
 async function starte($: EngineInterface, z: Zustand, lage: Lage, c: Checkout, oeffnen: boolean): Promise<string> {
   // Fremde Server bleiben, wo eine andere Sitzung gerade arbeitet.
-  const andere = lage.server.filter(s => s.pfad !== c.pfad && !benutzt(lage, s.pfad)?.arbeitet)
-  if (andere.length) await stoppe($, andere)
+  const andere = await stoppe($, z, lage.server.filter(s => s.pfad !== c.pfad && !benutzt(lage, s.pfad)?.arbeitet))
   const laeuft = lage.server.some(s => s.pfad === c.pfad && s.port === c.web)
   const url = `http://localhost:${c.web}/`
   const gestoppt = andere.length ? ` Gestoppt: ${[...new Set(andere.map(s => `${lage.checkouts.find(x => x.pfad === s.pfad)?.name ?? '?'} :${s.port}`))].join(', ')}.` : ''
@@ -341,9 +355,8 @@ async function starte($: EngineInterface, z: Zustand, lage: Lage, c: Checkout, o
 }
 
 async function stoppeCheckout($: EngineInterface, z: Zustand, lage: Lage, c: Checkout | 'alle'): Promise<string> {
-  const ziel = lage.server.filter(s => c === 'alle' || s.pfad === c.pfad)
+  const ziel = await stoppe($, z, lage.server.filter(s => c === 'alle' || s.pfad === c.pfad))
   if (!ziel.length) return 'Da läuft nichts.'
-  await stoppe($, ziel)
   await frischeLage($, z, lage.repo)
   return `Gestoppt: ${ziel.map(s => `${lage.checkouts.find(x => x.pfad === s.pfad)?.name ?? '?'} :${s.port}`).join(', ')}.`
 }
@@ -365,8 +378,7 @@ async function entferne($: EngineInterface, z: Zustand, lage: Lage, c: Checkout,
   if (s) return `${c.name}: Sitzung „${s.name}“ arbeitet dort, bleibt stehen.`
   if (c.offen) return `${c.name}: ${c.offen} Dateien offen, bleibt stehen (erst committen oder verwerfen).`
   if (c.vor > 0 && !auchUngemergt) return `${c.name}: ${c.vor} Commits nicht gemergt, bleibt stehen (/werkbank weg ${c.name} löscht trotzdem).`
-  const server = lage.server.filter(x => x.pfad === c.pfad)
-  if (server.length) await stoppe($, server)
+  const server = await stoppe($, z, lage.server.filter(x => x.pfad === c.pfad))
   const link = await $.fs.stat(`${c.pfad}/node_modules`).catch(() => null)
   if (link?.isLink) await lauf($, ['/bin/rm', `${c.pfad}/node_modules`])
   const r = await lauf($, ['git', '-C', lage.repo, 'worktree', 'remove', c.pfad])
@@ -469,7 +481,7 @@ async function folge($: EngineInterface, z: Zustand, dir: string) {
 export const register: Register = on => {
   const z: Zustand = {
     home: '', sid: '', repo: null, lage: null, fensterOffen: false, laedt: null, repoCache: new Map(),
-    meinCheckout: null, aufraeumenNachZug: new Set(), status: undefined, meldung: '',
+    meinCheckout: null, aufraeumenNachZug: new Set(), status: undefined, meldung: '', vorfahren: null,
   }
 
   on('session.start', async ($, e, next) => {
