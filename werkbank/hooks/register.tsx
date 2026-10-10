@@ -2,7 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import {
   absolut, befehlsOrt, checkoutVon, fmtAlter, istHauptbranch, istWorktreeAdd, leseCwds, leseLauscher, leseWorktrees,
-  loeschZiele, naechsterPlatz, portsFuer, PUSH, q, startBefehl, zaehleOffen, zielMain,
+  loeschZiele, naechsterPlatz, offenePfade, portsFuer, PUSH, q, startBefehl, zaehleOffen, zielMain, zuletztGeaendert,
 } from './rein'
 
 const SEK = 1000
@@ -14,6 +14,8 @@ const FENSTER_MS = 3 * SEK
 const SITZUNG_GILT_MS = 6 * 60 * MIN
 const PANE = 'werkbank'
 const BROWSER = 'mcp__Claude_Browser__preview_start'
+// Für „zuletzt geändert“ reichen die ersten offenen Dateien: mehr stat-Aufrufe bremsen nur.
+const OFFEN_STAT_MAX = 40
 
 type Checkout = {
   pfad: string
@@ -25,6 +27,8 @@ type Checkout = {
   hinter: number
   offen: number
   alter: number
+  /** Jüngste Änderung (ms): letzter Commit oder später bearbeitete offene Datei. */
+  geaendert: number
   platz: number
   web: number
   api: number
@@ -147,13 +151,19 @@ async function ladeLage($: EngineInterface, z: Zustand, repo: string): Promise<L
     ])
     const [hinter = 0, vor = 0] = (lr ?? '0 0').trim().split(/\s+/).map(Number)
     const offen = st === null ? 0 : zaehleOffen(st)
+    const commitZeit = ct ? Number(ct.trim()) * SEK : 0
+    let geaendert = commitZeit
+    for (const f of st === null ? [] : offenePfade(st).slice(0, OFFEN_STAT_MAX)) {
+      const s = await $.fs.stat(`${w.pfad}/${f}`).catch(() => null)
+      if (s && s.mtimeMs > geaendert) geaendert = s.mtimeMs
+    }
     const key = `ungemergt:${w.pfad}`
     if (vor > 0) await $.store.set(key, true)
     const warUngemergt = vor === 0 && (await $.store.get(key)) === true
     const platz = pl[w.pfad] ?? 0
     return {
       pfad: w.pfad, name: i === 0 ? (w.branch ?? 'main') : (w.branch ?? w.pfad.split('/').pop()!), branch: w.branch, head: w.head,
-      haupt: i === 0, vor, hinter, offen, alter: ct ? now - Number(ct.trim()) * SEK : 0, platz, ...portsFuer(platz),
+      haupt: i === 0, vor, hinter, offen, alter: commitZeit ? now - commitZeit : 0, geaendert, platz, ...portsFuer(platz),
       gemergt: i > 0 && warUngemergt && offen === 0, leer: i > 0 && !warUngemergt && vor === 0 && offen === 0,
     }
   }))
@@ -469,7 +479,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'werkbank',
       description: 'Checkouts, Ports und Dev-Server des Repos (werkbank)',
-      argumentHint: '[dev <branch> | stopp [<branch>|alle] | aufräumen | was <branch> | weg <branch>]',
+      argumentHint: '[dev [<branch>] | stopp [<branch>|alle] | aufräumen | was <branch> | weg <branch>]',
       immediate: true,
     })
     await $.tool.register({
@@ -603,6 +613,12 @@ export const register: Register = on => {
     if (aktion === 'aufraeumen') return { text: (await aufraeumen($, z, lage, true)).join('\n') || 'Nichts aufzuräumen.' }
     if (aktion === 'stopp') return { text: await stoppeCheckout($, z, lage, wer === 'alle' || !wer ? 'alle' : c ?? 'alle') }
     if (wer && !c) return { text: `Keinen Checkout „${wer}“ gefunden.\n\n${lageText(lage)}` }
+    // Ohne Angabe startet dev den zuletzt geänderten Checkout: meist der, an dem gerade gearbeitet wird.
+    if (aktion === 'dev' && !c) {
+      const neu = zuletztGeaendert(lage.checkouts)!
+      const wann = neu.geaendert ? ` (zuletzt geändert vor ${fmtAlter(Math.max(0, lage.at - neu.geaendert))})` : ''
+      return { text: `${neu.name}${wann}: ${await starte($, z, lage, neu, true)}` }
+    }
     const ziel = c ?? lage.checkouts.find(x => x.pfad === z.meinCheckout) ?? lage.checkouts[0]!
     if (aktion === 'dev') return { text: await starte($, z, lage, ziel, true) }
     if (aktion === 'was') return { text: await wasDrin($, lage, ziel) }

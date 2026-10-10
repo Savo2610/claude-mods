@@ -18,7 +18,9 @@ weg kann. Claude hält sich an diese Plätze, statt jedes Mal neu zu improvisier
   Uploader und Kurzlink frei). Der Platz bleibt, solange es den Worktree gibt.
 - **Dev-Server:** `/werkbank dev raupe` startet Web und API dieses Checkouts im
   Hintergrund (vite mit `--port … --strictPort`, `API_PORT` für beide), stoppt
-  die anderen Server des Repos und öffnet die Vorschau. Server, in deren Checkout
+  die anderen Server des Repos und öffnet die Vorschau. Ohne Branch startet
+  `/werkbank dev` den zuletzt geänderten Checkout (jüngster Commit oder
+  zuletzt bearbeitete offene Datei). Server, in deren Checkout
   gerade eine andere Sitzung arbeitet, bleiben stehen. Ein frischer Worktree
   bekommt einen Link auf die `node_modules` von main. Logs:
   `~/.claude/werkbank/logs/`. Die Server laufen weiter, wenn die Sitzung endet.
@@ -43,7 +45,7 @@ oder frei); läuft dort auch die Werkbank, weiß sie zudem, in welchem Worktree.
 | Befehl | Wirkung |
 | --- | --- |
 | `/werkbank` | Fenster öffnen, Lage als Text |
-| `/werkbank dev [branch]` | Dev-Server dieses Checkouts starten, andere stoppen, Vorschau öffnen |
+| `/werkbank dev [branch]` | Dev-Server des Checkouts starten (ohne Branch: der zuletzt geänderte), andere stoppen, Vorschau öffnen |
 | `/werkbank stopp [branch\|alle]` | Server stoppen |
 | `/werkbank aufräumen` | Gemergte und leere Worktrees entfernen, den Rest erklären |
 | `/werkbank was <branch>` | Commits und offene Dateien eines Checkouts |

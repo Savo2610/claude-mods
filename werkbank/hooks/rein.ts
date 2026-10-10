@@ -59,6 +59,20 @@ export function leseCwds(ausgabe: string): Map<number, string> {
   return m
 }
 
+/** Die Pfade aus `git status --porcelain` (bei Umbenennung der neue), ohne den node_modules-Link. */
+export function offenePfade(ausgabe: string): string[] {
+  return ausgabe.split('\n')
+    .filter(z => z.trim() && !/^\?\? node_modules\/?$/.test(z))
+    .map(z => z.slice(3).split(' -> ').pop()!.replace(/^"(.*)"$/, '$1'))
+}
+
+/** Der Checkout mit der jüngsten Änderung (Commit oder offene Datei); bei Gleichstand der erste. */
+export function zuletztGeaendert<T extends { geaendert: number }>(checkouts: readonly T[]): T | undefined {
+  let best: T | undefined
+  for (const c of checkouts) if (!best || c.geaendert > best.geaendert) best = c
+  return best
+}
+
 /** `git status --porcelain`: geänderte Dateien, ohne den eigenen node_modules-Link. */
 export function zaehleOffen(ausgabe: string): number {
   return ausgabe.split('\n').filter(z => z.trim() && !/^\?\? node_modules\/?$/.test(z)).length

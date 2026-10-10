@@ -2,7 +2,7 @@ import { describe, expect, mock, test, tier } from 'claude-code/testing'
 import type { CommandRunInput, FsEntry, On, ProcessRunResult, SessionStartInput, TurnCompleteInput } from 'claude-code'
 
 import {
-  befehlsOrt, checkoutVon, leseCwds, leseLauscher, leseWorktrees, loeschZiele, naechsterPlatz, portsFuer, startBefehl,
+  befehlsOrt, checkoutVon, leseCwds, leseLauscher, leseWorktrees, loeschZiele, naechsterPlatz, offenePfade, portsFuer, startBefehl,
   zaehleOffen, zielMain,
 } from '../hooks/rein'
 
@@ -23,6 +23,7 @@ describe('Hilfen', () => {
       { pid: 10, cmd: 'node', port: 5173 }, { pid: 11, cmd: 'workerd', port: 8787 },
     ])
     expect(leseCwds('p10\nfcwd\nn/c/Tal\np11\nfcwd\nn/c/Tal-raupe/.wrangler\n')).toEqual(new Map([[10, '/c/Tal'], [11, '/c/Tal-raupe/.wrangler']]))
+    expect(offenePfade(' M a.js\n?? node_modules\nR  alt.js -> neu.js\n?? "mit leer.js"\n')).toEqual(['a.js', 'neu.js', 'mit leer.js'])
     expect(zaehleOffen(' M a.js\n?? node_modules\n?? neu.js\n')).toBe(2)
     expect(checkoutVon('/c/Tal-raupe/src/x.js', [R, `${R}-raupe`])).toBe(`${R}-raupe`)
     expect(checkoutVon('/c/Talent', [R])).toBe(undefined)
@@ -59,7 +60,8 @@ describe('Hilfen', () => {
 
 // ---------- Eine nachgebaute Welt: Repo mit Worktrees, Server, Sitzungen ----------
 
-type Wt = { pfad: string; branch: string; vor: number; hinter?: number; offen?: number }
+// commitVor / dateiVor: wie viele Minuten der letzte Commit bzw. die offenen Dateien zurückliegen.
+type Wt = { pfad: string; branch: string; vor: number; hinter?: number; offen?: number; commitVor?: number; dateiVor?: number }
 type Opts = { wts?: Wt[]; server?: { pid: number; port: number; cwd: string }[]; andere?: { sid: string; name: string; cwd: string; busy: boolean; checkout?: string }[] }
 
 const session: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: R }
@@ -103,6 +105,8 @@ function welt(on: On, opts: Opts = {}) {
   on('ui.open', () => ({ value: { id: 'werkbank' } }) as never)
   on('fs.exists', ($, e) => ({ value: da(e.path) }))
   on('fs.stat', ($, e) => {
+    const offen = wts.find(w => w.dateiVor !== undefined && new RegExp(`^${w.pfad}/f\\d+\\.js$`).test(e.path))
+    if (offen) return { value: { kind: 'file', size: 1, mtimeMs: START - offen.dateiVor! * MIN, isLink: false } }
     if (!da(e.path)) throw new Error('ENOENT')
     return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink: links.includes(e.path) } }
   })
@@ -128,7 +132,7 @@ function welt(on: On, opts: Opts = {}) {
       if (rest.startsWith('rev-parse --verify -q origin/main')) return aus('sha\n')
       if (rest === 'status --porcelain') return aus(Array.from({ length: w?.offen ?? 0 }, (_, i) => ` M f${i}.js`).join('\n'))
       if (rest.startsWith('rev-list --left-right --count')) return aus(`${w?.hinter ?? 0}\t${w?.vor ?? 0}\n`)
-      if (rest.startsWith('log -1')) return aus(`${(START - 3 * MIN) / 1000}\n`)
+      if (rest.startsWith('log -1')) return aus(`${(START - (w?.commitVor ?? 3) * MIN) / 1000}\n`)
       if (rest.startsWith('worktree remove')) {
         const p = a.at(-1)!
         entfernt.push(p)
@@ -253,6 +257,33 @@ describe('Dev-Server', () => {
     // Ein zweites Mal: läuft schon, nichts Neues.
     expect((await $.command.run(befehl('dev raupe'))).text).toContain('läuft schon')
     expect(w.gestartet).toHaveLength(2)
+  })
+
+  test('/werkbank dev ohne Branch: der zuletzt geänderte Checkout', async ($, on) => {
+    mock.clock(on, { now: START })
+    const w = welt(on, {
+      wts: [
+        { pfad: `${R}-raupe`, branch: 'raupe', vor: 1, commitVor: 30 },
+        // Älterer Commit, aber eine offene Datei von vor 2 min: der ist der jüngste.
+        { pfad: `${R}-tiere`, branch: 'tiere', vor: 1, commitVor: 120, offen: 1, dateiVor: 2 },
+      ],
+    })
+    await $.session.start(session)
+    const r = await $.command.run(befehl('dev'))
+    expect(r.text).toContain('tiere (zuletzt geändert vor 2 min): tiere läuft auf http://localhost:5175/')
+    expect(w.gestartet.at(-1)).toContain('--port 5175')
+  })
+
+  test('/werkbank dev ohne Branch: ein frischer Commit schlägt alte offene Dateien', async ($, on) => {
+    mock.clock(on, { now: START })
+    welt(on, {
+      wts: [
+        { pfad: `${R}-raupe`, branch: 'raupe', vor: 1, commitVor: 1 },
+        { pfad: `${R}-tiere`, branch: 'tiere', vor: 1, commitVor: 120, offen: 2, dateiVor: 60 },
+      ],
+    })
+    await $.session.start(session)
+    expect((await $.command.run(befehl('dev'))).text).toContain('raupe (zuletzt geändert vor 1 min)')
   })
 
   test('der Server einer arbeitenden Sitzung bleibt stehen', async ($, on) => {
