@@ -3,7 +3,7 @@
   "owner": {
     "name": "Julian Veerkamp"
   },
-  "description": "Deutsche Claude-Code-Mods: Telegram als Draht zum Handy (telegram-draht), ein Wächter für den Prompt-Cache (cache-waechter) und eine Wache für Cloudflare-Deploys (deploy-wacht).",
+  "description": "Deutsche Claude-Code-Mods: Telegram als Draht zum Handy (telegram-draht), ein Wächter für den Prompt-Cache (cache-waechter) eine Wache für Cloudflare-Deploys (deploy-wacht) und eine Werkbank für Worktrees und Dev-Server (werkbank).",
   "plugins": [
     {
       "name": "cache-waechter",
@@ -16,6 +16,10 @@
     {
       "name": "telegram-draht",
       "source": "./telegram-draht"
+    },
+    {
+      "name": "werkbank",
+      "source": "./werkbank"
     }
   ]
 }

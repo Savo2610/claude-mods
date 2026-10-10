@@ -1,0 +1,8 @@
+{
+  "name": "werkbank",
+  "version": "0.1.0",
+  "description": "Zeigt, welcher Checkout eines Repos wo läuft und wer daran arbeitet, gibt jedem Worktree einen festen Port, startet und stoppt Dev-Server, räumt gemergte Worktrees auf und schützt Checkouts anderer Sessions.",
+  "author": {
+    "name": "Julian Veerkamp"
+  }
+}
